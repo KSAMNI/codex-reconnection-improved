@@ -31,6 +31,8 @@ pub const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
 const MAX_STREAM_MAX_RETRIES: u64 = 100;
 /// Hard cap for user-configured `request_max_retries`.
 const MAX_REQUEST_MAX_RETRIES: u64 = 100;
+/// Environment variable name for overriding stream max retries
+const ENV_STREAM_MAX_RETRIES: &str = "CODEX_STREAM_MAX_RETRIES";
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 pub const OPENAI_PROVIDER_ID: &str = "openai";
@@ -301,9 +303,19 @@ impl ModelProviderInfo {
     }
 
     /// Effective maximum number of stream reconnection attempts for this provider.
+    /// Can be overridden by the CODEX_STREAM_MAX_RETRIES environment variable.
     pub fn stream_max_retries(&self) -> u64 {
+        // Check environment variable first
+        let default_retries = if let Ok(env_value) = std::env::var(ENV_STREAM_MAX_RETRIES) {
+            env_value
+                .parse::<u64>()
+                .unwrap_or(DEFAULT_STREAM_MAX_RETRIES)
+        } else {
+            DEFAULT_STREAM_MAX_RETRIES
+        };
+
         self.stream_max_retries
-            .unwrap_or(DEFAULT_STREAM_MAX_RETRIES)
+            .unwrap_or(default_retries)
             .min(MAX_STREAM_MAX_RETRIES)
     }
 

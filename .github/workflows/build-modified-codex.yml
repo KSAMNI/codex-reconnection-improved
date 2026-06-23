@@ -1,0 +1,96 @@
+name: Build Modified Codex
+
+on:
+  workflow_dispatch:
+    inputs:
+      retry_count:
+        description: 'Default retry count (leave empty for 5)'
+        required: false
+        default: ''
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  build:
+    name: Build Windows x64
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Set up Cargo cache
+        uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a # v4.2.2
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            codex-rs/target/
+          key: windows-cargo-x64-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build codex
+        working-directory: codex-rs
+        run: |
+          cargo build --release --bin codex --target x86_64-pc-windows-msvc
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          Copy-Item "codex-rs\target\x86_64-pc-windows-msvc\release\codex.exe" -Destination "codex-windows-x64.exe"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f2ddaad6cc25d99953338e0aab5fae8e88f # v4.6.0
+        with:
+          name: codex-windows-x64.exe
+          path: codex-windows-x64.exe
+          retention-days: 7
+
+  create-release-info:
+    name: Create release info
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - name: Create info file
+        run: |
+          cat > RELEASE_INFO.md << 'EOF'
+          # Modified Codex Build - Windows x64
+
+          ## Changes
+          1. Environment variable control: CODEX_STREAM_MAX_RETRIES
+          2. Fixed 1-second retry delay
+          3. All retries shown in real-time
+
+          ## Usage
+          ```powershell
+          # Set retry count
+          $env:CODEX_STREAM_MAX_RETRIES=10
+
+          # Run codex
+          .\codex-windows-x64.exe
+          ```
+
+          ## Verify
+          - Shows "Reconnecting... X/Y" for every retry
+          - 1 second delay between retries
+          - Adjustable retry count via environment variable
+
+          ## Build Info
+          - Build: ${{ github.run_id }}
+          - Commit: ${{ github.sha }}
+          - Branch: ${{ github.ref_name }}
+          EOF
+
+      - name: Upload release info
+        uses: actions/upload-artifact@ea165f2ddaad6cc25d99953338e0aab5fae8e88f # v4.6.0
+        with:
+          name: RELEASE_INFO
+          path: RELEASE_INFO.md
+          retention-days: 7
