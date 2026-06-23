@@ -12,6 +12,8 @@ use tracing::warn;
 
 /// Fixed retry delay (1 second)
 const RETRY_DELAY_MS: u64 = 1000;
+const RATE_LIMIT_HTTP_STATUS_CODE: u16 = 429;
+const RATE_LIMIT_RETRY_MAX_RETRIES: u64 = 100;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
@@ -30,6 +32,12 @@ pub(crate) async fn handle_retryable_response_stream_error(
     turn_context: &TurnContext,
     request: ResponsesStreamRequest,
 ) -> Result<(), CodexErr> {
+    let max_retries = if err.http_status_code_value() == Some(RATE_LIMIT_HTTP_STATUS_CODE) {
+        RATE_LIMIT_RETRY_MAX_RETRIES
+    } else {
+        max_retries
+    };
+
     if *retries >= max_retries
         && client_session.try_switch_fallback_transport(
             &turn_context.session_telemetry,
