@@ -1,0 +1,92 @@
+name: Build Modified Codex
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  build:
+    name: Build Windows x64
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Set up Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            codex-rs/target/
+          key: windows-cargo-x64-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build codex
+        working-directory: codex-rs
+        run: |
+          cargo build --release --bin codex --target x86_64-pc-windows-msvc
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          Copy-Item "codex-rs\target\x86_64-pc-windows-msvc\release\codex.exe" -Destination "codex-windows-x64.exe"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-windows-x64.exe
+          path: codex-windows-x64.exe
+          retention-days: 7
+
+  create-release-info:
+    name: Create release info
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - name: Create info file
+        run: |
+          cat > RELEASE_INFO.md << 'EOF'
+          # Modified Codex Build - Windows x64
+
+          Base: upstream rust-v0.155.0
+
+          ## Changes
+          1. Fixed 10-second retry interval for model requests and response streams (no exponential growth, no jitter)
+          2. Max retries raised to 999 (hard cap for `stream_max_retries` / `request_max_retries` is now 999)
+          3. HTTP-level request retries also wait a fixed 10 seconds
+
+          ## Configure retry count
+          In `~/.codex/config.toml`:
+
+          ```toml
+          [model_providers.custom]
+          stream_max_retries = 999
+          request_max_retries = 999
+          ```
+
+          ## Verify
+          - "Reconnecting... X/Y" appears for every retry
+          - ~10 seconds between attempts
+
+          ## Build Info
+          - Build: ${{ github.run_id }}
+          - Commit: ${{ github.sha }}
+          - Branch: ${{ github.ref_name }}
+          EOF
+
+      - name: Upload release info
+        uses: actions/upload-artifact@v4
+        with:
+          name: RELEASE_INFO
+          path: RELEASE_INFO.md
+          retention-days: 7

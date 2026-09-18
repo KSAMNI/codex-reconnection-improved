@@ -5,7 +5,7 @@ use std::time::Duration;
 use crate::client::ModelClientSession;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
-use crate::util::backoff;
+use crate::util::RETRY_INTERVAL;
 use codex_client::RetryOperation;
 use codex_features::Feature;
 use codex_protocol::error::CodexErr;
@@ -14,8 +14,10 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
 use tracing::warn;
 
-const INITIAL_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(5);
-const MAX_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(60);
+/// Fixed 10s wait between connection retry attempts.
+const INITIAL_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(10);
+/// Upper bound is the same 10s, so every attempt waits exactly 10s.
+const MAX_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
@@ -109,7 +111,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
     if retry_state.retries < max_retries {
         retry_state.retries += 1;
         let retry_count = retry_state.retries;
-        let delay = err.retry_delay().unwrap_or_else(|| backoff(retry_count));
+        let delay = RETRY_INTERVAL;
         log_retry(request, turn_context, &err, retry_count, max_retries, delay);
 
         // In release builds, hide the first websocket retry notification to reduce noisy

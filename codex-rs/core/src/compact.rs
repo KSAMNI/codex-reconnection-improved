@@ -21,7 +21,7 @@ use crate::session::step_context::StepContext;
 use crate::session::turn::get_last_assistant_message_from_turn;
 use crate::session::turn_context::TurnContext;
 use crate::state::AutoCompactWindowIds;
-use crate::util::backoff;
+use crate::util::RETRY_INTERVAL;
 use codex_analytics::CodexCompactionEvent;
 use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
@@ -334,7 +334,7 @@ async fn run_compact_task_inner_impl(
             Err(e) => {
                 if retries < max_retries {
                     retries += 1;
-                    let delay = backoff(retries);
+                    let delay = RETRY_INTERVAL;
                     sess.notify_stream_error(
                         turn_context.as_ref(),
                         format!("Reconnecting... {retries}/{max_retries}"),

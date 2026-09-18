@@ -5,6 +5,8 @@ use tracing::error;
 
 const INITIAL_DELAY_MS: u64 = 200;
 const BACKOFF_FACTOR: f64 = 2.0;
+/// Fixed delay between attempts for model requests and response streams.
+pub const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Emit structured feedback metadata as key/value pairs.
 ///
