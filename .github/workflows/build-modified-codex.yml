@@ -63,7 +63,7 @@ jobs:
           ## Changes
           1. Fixed 10-second retry interval for model requests and response streams (no exponential growth, no jitter)
           2. Max retries raised to 999 (hard cap for `stream_max_retries` / `request_max_retries` is now 999)
-          3. Transport-layer (HTTP) retries are silent by design, so their budget is capped at 2: errors now surface quickly to the visible retry loop instead of hanging for hours on a frozen "working" spinner
+          3. The transport (HTTP) layer performs no retries of its own - it is silent by design, so errors reach the visible retry loop immediately instead of leaving a frozen "working" spinner for hours
           4. Every stream retry is reported to the UI, including the first one
 
           ## Configure retry count

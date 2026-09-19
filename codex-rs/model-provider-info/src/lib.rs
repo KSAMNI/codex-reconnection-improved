@@ -36,10 +36,10 @@ pub const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
 const MAX_STREAM_MAX_RETRIES: u64 = 999;
 /// Hard cap for user-configured `request_max_retries`.
 const MAX_REQUEST_MAX_RETRIES: u64 = 999;
-/// Retry attempts the transport layer may perform on its own. This layer has no
-/// way to report progress to the UI, so its budget must stay tiny: the core turn
-/// loop retries visibly ("Reconnecting...") and owns the long retry budget.
-const MAX_SILENT_TRANSPORT_RETRIES: u64 = 2;
+/// Retry attempts the transport layer may perform entirely on its own. This layer
+/// cannot report progress to the UI, so it gets none: every retry is issued by the
+/// core turn loop, which shows "Reconnecting... n/m" and waits 10s between attempts.
+const MAX_SILENT_TRANSPORT_RETRIES: u64 = 0;
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 const OPENAI_ACTOR_AUTHORIZATION_HEADER: &str = "x-openai-actor-authorization";
