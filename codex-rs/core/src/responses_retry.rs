@@ -114,21 +114,14 @@ pub(crate) async fn handle_retryable_response_stream_error(
         let delay = RETRY_INTERVAL;
         log_retry(request, turn_context, &err, retry_count, max_retries, delay);
 
-        // In release builds, hide the first websocket retry notification to reduce noisy
-        // transient reconnect messages. In debug builds, keep full visibility for diagnosis.
-        let report_error = retry_count > 1
-            || cfg!(debug_assertions)
-            || !sess.services.model_client.responses_websocket_enabled();
-        if report_error {
-            // Surface retry information to any UI/front-end so the user understands what is
-            // happening instead of staring at a seemingly frozen screen.
-            sess.notify_stream_error(
-                turn_context,
-                format!("Reconnecting... {retry_count}/{max_retries}"),
-                err,
-            )
-            .await;
-        }
+        // Always surface every retry attempt (including the first one) so that a long
+        // outage stays visible instead of looking like a frozen "working" spinner.
+        sess.notify_stream_error(
+            turn_context,
+            format!("Reconnecting... {retry_count}/{max_retries}"),
+            err,
+        )
+        .await;
         codex_client::record_retry!(retry_count, delay, operation);
         tokio::time::sleep(delay).await;
         return Ok(());
