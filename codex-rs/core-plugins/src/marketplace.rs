@@ -1,5 +1,5 @@
+use crate::manifest::ManifestCache;
 use crate::manifest::PluginManifestInterface;
-use crate::manifest::load_plugin_manifest;
 use codex_app_server_protocol::PluginAuthPolicy;
 use codex_app_server_protocol::PluginInstallPolicy;
 use codex_git_utils::get_git_repo_root;
@@ -21,6 +21,7 @@ const MARKETPLACE_MANIFEST_RELATIVE_PATHS: &[&str] = &[
     ".agents/plugins/marketplace.json",
     ".agents/plugins/api_marketplace.json",
     ".claude-plugin/marketplace.json",
+    ".cursor-plugin/marketplace.json",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,15 +87,17 @@ impl MarketplacePluginManifestFallback {
     }
 
     pub(crate) fn parse_for_listing(&self) -> Option<crate::manifest::PluginManifest> {
-        // Git sources have no plugin root before install. Parse against a synthetic absolute root,
-        // then discard path-bearing fields so listings expose metadata only.
+        // Materialized sources have no plugin root before install. Parse against a host-native
+        // synthetic absolute root, then discard path-bearing fields so listings expose metadata only.
+        let plugin_root = Path::new(if cfg!(windows) { r"C:\" } else { "/" });
         let mut manifest = crate::manifest::parse_plugin_manifest(
-            Path::new("/"),
-            Path::new("/.codex-plugin/plugin.json"),
+            plugin_root,
+            &fallback_plugin_manifest_path(plugin_root),
             &self.contents,
         )
         .ok()?;
         manifest.paths = crate::manifest::PluginManifestPaths {
+            onboarding_skill: None,
             skills: Vec::new(),
             mcp_servers: None,
             apps: None,
@@ -132,6 +135,23 @@ pub enum MarketplacePluginSource {
         ref_name: Option<String>,
         sha: Option<String>,
     },
+    Npm {
+        package: String,
+        version: Option<String>,
+        registry: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NpmPackageScope {
+    Scoped,
+    Unscoped,
+}
+
+impl MarketplacePluginSource {
+    pub(crate) fn is_install_materialized(&self) -> bool {
+        matches!(self, Self::Git { .. } | Self::Npm { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,6 +244,7 @@ impl MarketplaceError {
     }
 }
 
+// TODO: thread an owner-provided manifest cache through standalone install/read workflows.
 pub fn find_marketplace_plugin(
     marketplace_path: &AbsolutePathBuf,
     plugin_name: &str,
@@ -236,9 +257,12 @@ pub fn find_marketplace_plugin(
             continue;
         }
 
-        if let Some(plugin) =
-            resolve_marketplace_plugin_entry(marketplace_path, &marketplace_name, plugin)?
-        {
+        if let Some(plugin) = resolve_marketplace_plugin_entry(
+            marketplace_path,
+            &marketplace_name,
+            plugin,
+            &ManifestCache::disabled(),
+        )? {
             return Ok(plugin);
         }
     }
@@ -348,25 +372,35 @@ fn marketplace_root_from_layout(marketplace_path: &Path, relative_path: &str) ->
     Some(current.to_path_buf())
 }
 
+// TODO: allow standalone callers to share a cache across marketplace loads.
 pub fn load_marketplace(path: &AbsolutePathBuf) -> Result<Marketplace, MarketplaceError> {
+    load_marketplace_with_cache(path, &ManifestCache::disabled())
+}
+
+fn load_marketplace_with_cache(
+    path: &AbsolutePathBuf,
+    manifest_cache: &ManifestCache,
+) -> Result<Marketplace, MarketplaceError> {
     let marketplace = load_raw_marketplace_manifest(path)?;
     let mut plugins = Vec::new();
 
     for plugin in marketplace.plugins {
-        let plugin = match resolve_marketplace_plugin_entry(path, &marketplace.name, plugin) {
-            Ok(Some(plugin)) => plugin,
-            Ok(None) => continue,
-            Err(MarketplaceError::InvalidPlugin(message)) => {
-                warn!(
-                    path = %path.display(),
-                    marketplace = %marketplace.name,
-                    error = %message,
-                    "skipping invalid marketplace plugin"
-                );
-                continue;
-            }
-            Err(err) => return Err(err),
-        };
+        let plugin =
+            match resolve_marketplace_plugin_entry(path, &marketplace.name, plugin, manifest_cache)
+            {
+                Ok(Some(plugin)) => plugin,
+                Ok(None) => continue,
+                Err(MarketplaceError::InvalidPlugin(message)) => {
+                    warn!(
+                        path = %path.display(),
+                        marketplace = %marketplace.name,
+                        error = %message,
+                        "skipping invalid marketplace plugin"
+                    );
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
 
         let manifest_fallback = plugin
             .manifest_fallback
@@ -400,15 +434,24 @@ pub fn load_marketplace(path: &AbsolutePathBuf) -> Result<Marketplace, Marketpla
     })
 }
 
+// TODO: pass an owner-provided cache from remaining callers; the manager already does.
 #[doc(hidden)]
 pub fn list_marketplaces_with_home(
     additional_roots: &[AbsolutePathBuf],
     home_dir: Option<&Path>,
 ) -> Result<MarketplaceListOutcome, MarketplaceError> {
+    list_marketplaces_with_cache(additional_roots, home_dir, &ManifestCache::disabled())
+}
+
+pub(crate) fn list_marketplaces_with_cache(
+    additional_roots: &[AbsolutePathBuf],
+    home_dir: Option<&Path>,
+    manifest_cache: &ManifestCache,
+) -> Result<MarketplaceListOutcome, MarketplaceError> {
     let mut outcome = MarketplaceListOutcome::default();
 
     for marketplace_path in discover_marketplace_paths_from_roots(additional_roots, home_dir) {
-        match load_marketplace(&marketplace_path) {
+        match load_marketplace_with_cache(&marketplace_path, manifest_cache) {
             Ok(marketplace) => outcome.marketplaces.push(marketplace),
             Err(err) => {
                 warn!(
@@ -488,6 +531,7 @@ fn resolve_marketplace_plugin_entry(
     marketplace_path: &AbsolutePathBuf,
     marketplace_name: &str,
     plugin: RawMarketplaceManifestPlugin,
+    manifest_cache: &ManifestCache,
 ) -> Result<Option<ResolvedMarketplacePlugin>, MarketplaceError> {
     let RawMarketplaceManifestPlugin {
         name,
@@ -505,17 +549,21 @@ fn resolve_marketplace_plugin_entry(
     let manifest = match &source {
         MarketplacePluginSource::Local { path } => {
             if codex_utils_plugins::find_plugin_manifest_path(path.as_path()).is_some() {
-                load_plugin_manifest(path.as_path())
+                manifest_cache
+                    .load(path.as_path())
+                    .map(|loaded| loaded.manifest)
             } else if manifest_fallback.has_metadata {
                 manifest_fallback.parse_for_plugin_root(path.as_path())
             } else {
                 None
             }
         }
-        MarketplacePluginSource::Git { .. } if manifest_fallback.has_metadata => {
+        MarketplacePluginSource::Git { .. } | MarketplacePluginSource::Npm { .. }
+            if manifest_fallback.has_metadata =>
+        {
             manifest_fallback.parse_for_listing()
         }
-        MarketplacePluginSource::Git { .. } => None,
+        MarketplacePluginSource::Git { .. } | MarketplacePluginSource::Npm { .. } => None,
     };
     let interface = plugin_interface_with_marketplace_category(
         manifest
@@ -609,6 +657,17 @@ fn resolve_plugin_source(
             ref_name: normalize_optional_git_selector(&ref_name),
             sha: normalize_optional_git_selector(&sha),
         }),
+        RawMarketplaceManifestPluginSource::Object(
+            RawMarketplaceManifestPluginSourceObject::Npm {
+                package,
+                version,
+                registry,
+            },
+        ) => Ok(MarketplacePluginSource::Npm {
+            package: normalize_npm_package(marketplace_path, &package)?,
+            version: normalize_optional_npm_version(marketplace_path, version)?,
+            registry: normalize_optional_npm_registry(marketplace_path, registry)?,
+        }),
         RawMarketplaceManifestPluginSource::Unsupported(_) => {
             unreachable!("unsupported plugin sources should be filtered before resolution")
         }
@@ -631,7 +690,13 @@ fn resolve_local_plugin_source_path(
     }
 
     // Non-root local sources must keep the explicit `./` prefix and remain normalized.
-    let Some(relative_path) = path.strip_prefix("./") else {
+    let relative_path = path.strip_prefix("./").or_else(|| {
+        marketplace_path
+            .as_path()
+            .ends_with(".cursor-plugin/marketplace.json")
+            .then_some(path)
+    });
+    let Some(relative_path) = relative_path else {
         return Err(MarketplaceError::InvalidMarketplaceFile {
             path: marketplace_path.to_path_buf(),
             message: "local plugin source path must start with `./`".to_string(),
@@ -745,6 +810,118 @@ fn normalize_optional_git_selector(value: &Option<String>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn normalize_npm_package(
+    marketplace_path: &AbsolutePathBuf,
+    package: &str,
+) -> Result<String, MarketplaceError> {
+    let package = package.trim();
+    let package_scope = if package.starts_with('@') {
+        NpmPackageScope::Scoped
+    } else {
+        NpmPackageScope::Unscoped
+    };
+    let segments = if let Some(scoped_package) = package.strip_prefix('@') {
+        scoped_package.split('/').collect::<Vec<_>>()
+    } else {
+        package.split('/').collect::<Vec<_>>()
+    };
+    let expected_segments = match package_scope {
+        NpmPackageScope::Scoped => 2,
+        NpmPackageScope::Unscoped => 1,
+    };
+    if package.is_empty()
+        || segments.len() != expected_segments
+        || segments
+            .iter()
+            .any(|segment| !is_valid_npm_package_segment(segment, package_scope))
+    {
+        return Err(MarketplaceError::InvalidMarketplaceFile {
+            path: marketplace_path.to_path_buf(),
+            message: format!("invalid npm plugin source package: {package}"),
+        });
+    }
+    Ok(package.to_string())
+}
+
+fn is_valid_npm_package_segment(segment: &str, package_scope: NpmPackageScope) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && (package_scope == NpmPackageScope::Scoped
+            || !matches!(segment.chars().next(), Some('.' | '_')))
+        && segment
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+}
+
+fn normalize_optional_npm_version(
+    marketplace_path: &AbsolutePathBuf,
+    version: Option<String>,
+) -> Result<Option<String>, MarketplaceError> {
+    let Some(version) = normalize_optional_npm_source_field(marketplace_path, version, "version")?
+    else {
+        return Ok(None);
+    };
+    if !is_registry_npm_version_selector(&version) {
+        return Err(MarketplaceError::InvalidMarketplaceFile {
+            path: marketplace_path.to_path_buf(),
+            message: format!("npm plugin source version must use the registry: {version}"),
+        });
+    }
+    Ok(Some(version))
+}
+
+fn is_registry_npm_version_selector(version: &str) -> bool {
+    version != "." && version != ".." && !version.chars().any(|ch| matches!(ch, '/' | '\\' | ':'))
+}
+
+fn normalize_optional_npm_registry(
+    marketplace_path: &AbsolutePathBuf,
+    registry: Option<String>,
+) -> Result<Option<String>, MarketplaceError> {
+    let Some(registry) =
+        normalize_optional_npm_source_field(marketplace_path, registry, "registry")?
+    else {
+        return Ok(None);
+    };
+    let parsed =
+        url::Url::parse(&registry).map_err(|_| MarketplaceError::InvalidMarketplaceFile {
+            path: marketplace_path.to_path_buf(),
+            message: format!("invalid npm plugin source registry: {registry}"),
+        })?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(MarketplaceError::InvalidMarketplaceFile {
+            path: marketplace_path.to_path_buf(),
+            message: format!("invalid npm plugin source registry: {registry}"),
+        });
+    }
+    Ok(Some(registry))
+}
+
+fn normalize_optional_npm_source_field(
+    marketplace_path: &AbsolutePathBuf,
+    value: Option<String>,
+    field: &str,
+) -> Result<Option<String>, MarketplaceError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(MarketplaceError::InvalidMarketplaceFile {
+            path: marketplace_path.to_path_buf(),
+            message: format!("npm plugin source {field} must not be empty"),
+        });
+    }
+    Ok(Some(value.to_string()))
 }
 
 fn normalize_github_git_url(url: &str) -> String {
@@ -884,6 +1061,11 @@ enum RawMarketplaceManifestPluginSourceObject {
         #[serde(rename = "ref")]
         ref_name: Option<String>,
         sha: Option<String>,
+    },
+    Npm {
+        package: String,
+        version: Option<String>,
+        registry: Option<String>,
     },
 }
 

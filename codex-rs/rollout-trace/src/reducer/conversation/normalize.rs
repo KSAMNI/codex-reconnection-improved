@@ -37,7 +37,15 @@ pub(super) fn normalize_model_items(
 ) -> Result<Vec<NormalizedConversationItem>> {
     let mut normalized_items = Vec::new();
     for item in items {
-        normalized_items.push(normalize_model_item(item, raw_payload)?);
+        if item.get("type").and_then(Value::as_str) == Some("additional_tools") {
+            continue;
+        }
+
+        let mut model_visible_item = item.clone();
+        if let Some(object) = model_visible_item.as_object_mut() {
+            object.remove("internal_chat_message_metadata_passthrough");
+        }
+        normalized_items.push(normalize_model_item(&model_visible_item, raw_payload)?);
     }
     Ok(normalized_items)
 }
@@ -46,6 +54,7 @@ pub(super) fn token_usage_from_value(value: &Value) -> Option<TokenUsage> {
     Some(TokenUsage {
         input_tokens: u64_field(value, "input_tokens")?,
         cached_input_tokens: u64_field(value, "cached_input_tokens")?,
+        cache_write_input_tokens: u64_field(value, "cache_write_input_tokens").unwrap_or(0),
         output_tokens: u64_field(value, "output_tokens")?,
         reasoning_output_tokens: u64_field(value, "reasoning_output_tokens")?,
     })
@@ -368,7 +377,9 @@ fn role_from_str(role: &str) -> Option<ConversationRole> {
 fn channel_from_phase(phase: &str) -> Option<ConversationChannel> {
     match phase {
         "commentary" => Some(ConversationChannel::Commentary),
-        "final_answer" => Some(ConversationChannel::Final),
+        // Both answer phases are Harmony final-channel text; only the latter
+        // declares a terminal answer.
+        "partial_answer" | "final_answer" => Some(ConversationChannel::Final),
         "summary" => Some(ConversationChannel::Summary),
         _ => None,
     }
