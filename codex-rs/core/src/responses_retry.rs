@@ -17,11 +17,24 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
+use rand::Rng;
 use tokio::time::Instant;
 use tracing::warn;
 
 const INITIAL_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+/// Upper bound of the randomized delay applied between retryable stream retries.
+///
+/// The retry loop used to sleep for exponential backoff (200ms doubling with jitter),
+/// which drifts into multi-minute waits while an upstream keeps answering HTTP 500/429.
+/// A randomized 0-2s delay keeps retries responsive without hammering the endpoint.
+const MAX_RETRY_DELAY_MS: u64 = 2_000;
+
+/// Randomized delay in `[0, MAX_RETRY_DELAY_MS]`, used instead of exponential backoff.
+fn random_retry_delay() -> Duration {
+    Duration::from_millis(rand::rng().random_range(0..=MAX_RETRY_DELAY_MS))
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
@@ -85,7 +98,9 @@ pub(crate) async fn handle_response_stream_error(
         ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
     };
     let retry_count = retry_state.retries.saturating_add(1);
-    let Some(delay) = err.retry_delay(retry_count) else {
+    // Keep the error's retryable/terminal classification, but ignore the delay it computes:
+    // retries are spaced with a randomized 0-2s delay instead of exponential backoff.
+    let Some(_backoff) = err.retry_delay(retry_count) else {
         return Err(err);
     };
     let retry_after = err.retry_after();
@@ -140,6 +155,9 @@ pub(crate) async fn handle_response_stream_error(
 
     if retry_state.retries < max_retries {
         retry_state.retries = retry_count;
+        // Randomized 0-2s delay instead of exponential backoff. Server retry advice is
+        // deliberately not applied here, so HTTP 500/429 responses retry within two seconds.
+        let delay = random_retry_delay();
         log_retry(request, turn_context, &err, retry_count, max_retries, delay);
 
         // In release builds, hide the first websocket retry notification to reduce noisy
@@ -157,9 +175,9 @@ pub(crate) async fn handle_response_stream_error(
             )
             .await;
         }
-        // Use one clock sample so local backoff telemetry retains the selected delay.
+        // Use one clock sample so local retry telemetry retains the selected delay.
         let now = Instant::now();
-        let retry_at = retry_after.map(RetryAfter::deadline).unwrap_or(now + delay);
+        let retry_at = now + delay;
         let delay = retry_at.saturating_duration_since(now);
         codex_client::record_retry!(retry_count, delay, operation);
         tokio::time::sleep_until(retry_at).await;

@@ -50,13 +50,13 @@ async fn sampling_retry_logs_stream_error_context() {
     ));
 }
 
-/// Time spent reporting a retry must count toward the server's original deadline.
+/// Retries are spaced with a randomized 0-2s delay; server retry advice is not applied.
 #[tokio::test]
 #[expect(
     clippy::await_holding_invalid_type,
     reason = "test holds the event-delivery lock to delay notification while virtual time advances"
 )]
-async fn stream_retry_preserves_deadline_across_delayed_notification() {
+async fn stream_retry_uses_randomized_delay_instead_of_server_advice() {
     let (mut session, turn_context) = make_session_and_context().await;
     let step_context = StepContext::for_test(Arc::new(turn_context));
     session.realtime_history = Some(Mutex::new(RealtimeHistoryState::default()));
@@ -69,9 +69,8 @@ async fn stream_retry_preserves_deadline_across_delayed_notification() {
 
     tokio::time::pause();
     let advice = RetryAfter::from_delay(Duration::from_secs(10)).expect("retry deadline");
-    tokio::time::advance(Duration::from_secs(4)).await;
 
-    // Hold the event-delivery lock so reporting the error consumes part of the deadline.
+    // Hold the event-delivery lock so reporting the error is still in flight when we poll.
     let history_guard = session.realtime_history.as_ref().unwrap().lock().await;
     let retry = handle_response_stream_error(
         &mut retry_state,
@@ -85,16 +84,15 @@ async fn stream_retry_preserves_deadline_across_delayed_notification() {
     tokio::pin!(retry);
     assert!(futures::poll!(&mut retry).is_pending());
     tokio::time::advance(Duration::from_secs(4)).await;
+    assert!(futures::poll!(&mut retry).is_pending());
     drop(history_guard);
 
-    assert!(futures::poll!(&mut retry).is_pending());
-    tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(futures::poll!(&mut retry).is_pending());
+    let resumed_from = Instant::now();
     retry.await.expect("retry should be allowed");
-    // Tokio rounds timer deadlines up to the next millisecond.
-    let resumed_at = Instant::now();
+    let waited = Instant::now().saturating_duration_since(resumed_from);
+    // The 10s of server advice would have kept the retry pending past this point.
     assert!(
-        (advice.deadline()..=advice.deadline() + Duration::from_millis(1)).contains(&resumed_at),
-        "retry resumed at {resumed_at:?}, expected {advice:?}"
+        waited <= Duration::from_millis(2_001),
+        "retry waited {waited:?}, expected at most the randomized 0-2s delay"
     );
 }
