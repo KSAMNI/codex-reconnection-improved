@@ -71,9 +71,11 @@ const DEFAULT_AWS_AUTH_REFRESH_TIMEOUT_MS: u64 = 300_000;
 pub const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
 /// Hard cap for user-configured `stream_max_retries`.
 ///
-/// Raised from 100 to 999 so that with the randomized 0-2s retry delay a provider keeps
-/// being retried for roughly half an hour instead of giving up after a few minutes.
-const MAX_STREAM_MAX_RETRIES: u64 = 999;
+/// Raised from the upstream 100 so the configured value actually applies. With the randomized
+/// 0-2s retry delay, 999 retries ride out roughly half an hour while 999999 is effectively
+/// unbounded; the configured value stays the real control, so a smaller budget can be chosen
+/// without rebuilding.
+const MAX_STREAM_MAX_RETRIES: u64 = 999_999;
 /// Hard cap for user-configured `request_max_retries`.
 const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 

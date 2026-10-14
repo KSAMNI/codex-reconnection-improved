@@ -75,7 +75,7 @@ jobs:
           1. Environment variable control: CODEX_STREAM_MAX_RETRIES
           2. Randomized 0-2s retry delay instead of exponential backoff (HTTP 500/429)
           3. Server Retry-After advice no longer delays stream retries
-          4. `stream_max_retries` hard cap raised from 100 to 999
+          4. `stream_max_retries` hard cap raised from 100 to 999999 (config stays the real control)
           5. All retries shown in real-time
 
           ## Usage
